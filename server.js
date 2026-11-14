@@ -29,19 +29,20 @@ fs.mkdirSync(privateBeatDir, { recursive: true });
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 
-const PAYPAL_ENV = (process.env.PAYPAL_ENV || 'sandbox').toLowerCase();
-const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN || `http://localhost:${port}`).replace(/\/$/, '');
 const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || '').trim();
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || '').trim();
+const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN || `http://localhost:${port}`).replace(/\/$/, '');
+const PAYPAL_ENV = (process.env.PAYPAL_ENV || 'sandbox').toLowerCase();
 const SESSION_SECRET = process.env.SESSION_SECRET || 'affan-sound-secret';
 
-const money = (value) => Number(value || 0).toFixed(2);
+function getPayPalAuthHeader() {
+  const clientId = process.env.PAYPAL_CLIENT_ID || '';
+  const secret = process.env.PAYPAL_CLIENT_SECRET || '';
+  return `Basic ${Buffer.from(`${clientId}:${secret}`).toString('base64')}`;
+}
 
-function requireAdmin(req, res, next) {
-  if (!req.session || !req.session.admin) {
-    return res.status(401).json({ ok: false, error: 'Administrator login required.' });
-  }
-  return next();
+function isPayPalConfigured() {
+  return Boolean(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
 }
 
 function normalizeLicenseId(value) {
@@ -58,9 +59,9 @@ const defaultBeats = [
 ];
 
 const defaultLicenses = [
-  { id: 'basic', name: 'Basic Lease', price: 150.00, description: 'Starter usage', formats: 'MP3', terms: 'Non-exclusive lease for early demos and short-term projects.', available: 1 },
-  { id: 'premium', name: 'Premium Lease', price: 240.00, description: 'Expanded usage', formats: 'MP3 + WAV', terms: 'Broader commercial usage within a defined release scope.', available: 1 },
-  { id: 'exclusive', name: 'Exclusive License', price: 600.00, description: 'Full exclusive rights', formats: 'MP3 + WAV + stems', terms: 'Exclusive rights are subject to availability and confirmation before capture.', available: 1 }
+  { id: 'basic', name: 'Basic Lease', price: 150, description: 'Starter usage', formats: 'MP3', terms: 'Non-exclusive lease for demos and short-term projects.', available: 1 },
+  { id: 'premium', name: 'Premium Lease', price: 240, description: 'Expanded usage', formats: 'MP3 + WAV', terms: 'Broader commercial usage within a defined release scope.', available: 1 },
+  { id: 'exclusive', name: 'Exclusive License', price: 600, description: 'Full exclusive rights', formats: 'MP3 + WAV + stems', terms: 'Exclusive rights are subject to availability and confirmation before capture.', available: 1 }
 ];
 
 const schemaSql = `
@@ -141,9 +142,9 @@ const schemaSql = `
 
 db.exec(schemaSql);
 
-function ensureSeed() {
-  const beatInsert = db.prepare(`INSERT OR IGNORE INTO beats (id, title, genre, bpm, key_name, description, status) VALUES (@id, @title, @genre, @bpm, @key, @description, @status)`);
-  const licenseInsert = db.prepare(`INSERT OR IGNORE INTO licenses (id, beat_id, name, price, description, formats, terms, available) VALUES (@id, @beat_id, @name, @price, @description, @formats, @terms, @available)`);
+function seedCatalog() {
+  const beatInsert = db.prepare('INSERT OR IGNORE INTO beats (id, title, genre, bpm, key_name, description, status) VALUES (@id, @title, @genre, @bpm, @key, @description, @status)');
+  const licenseInsert = db.prepare('INSERT OR IGNORE INTO licenses (id, beat_id, name, price, description, formats, terms, available) VALUES (@id, @beat_id, @name, @price, @description, @formats, @terms, @available)');
 
   for (const beat of defaultBeats) {
     beatInsert.run({ ...beat, key: beat.key || '' });
@@ -152,7 +153,7 @@ function ensureSeed() {
         id: license.id,
         beat_id: beat.id,
         name: license.name,
-        price: license.price,
+        price: Number(license.price || 0),
         description: license.description,
         formats: license.formats,
         terms: license.terms,
@@ -162,7 +163,7 @@ function ensureSeed() {
   }
 }
 
-ensureSeed();
+seedCatalog();
 
 function getBeatLicenses(beatId) {
   const rows = db.prepare('SELECT * FROM licenses WHERE beat_id = ? ORDER BY CASE id WHEN "basic" THEN 1 WHEN "premium" THEN 2 WHEN "exclusive" THEN 3 ELSE 4 END').all(beatId);
@@ -196,16 +197,6 @@ function getPublicCatalog() {
   }));
 }
 
-function getPayPalAuthHeader() {
-  const clientId = process.env.PAYPAL_CLIENT_ID || '';
-  const secret = process.env.PAYPAL_CLIENT_SECRET || '';
-  return `Basic ${Buffer.from(`${clientId}:${secret}`).toString('base64')}`;
-}
-
-function isPayPalConfigured() {
-  return Boolean(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
-}
-
 function validateCart(items) {
   const list = Array.isArray(items) ? items : [];
   const normalized = [];
@@ -214,6 +205,8 @@ function validateCart(items) {
   for (const item of list) {
     const beatId = String(item.beatId || '').trim();
     const licenseId = normalizeLicenseId(item.licenseId);
+    const quantity = Math.max(1, Number(item.quantity || item.qty || 1));
+
     if (!beatId || !licenseId) {
       throw new Error('Each cart item requires a beat and a selected license.');
     }
@@ -230,7 +223,6 @@ function validateCart(items) {
       throw new Error(`${beat.title} license is unavailable.`);
     }
 
-    const quantity = Math.max(1, Number(item.quantity || item.qty || 1));
     const subtotal = Number(license.price) * quantity;
     total += subtotal;
     normalized.push({ beatId, licenseId, quantity, beat, license, subtotal });
@@ -239,19 +231,27 @@ function validateCart(items) {
   return { normalized, total };
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const isAudio = /audio|mpeg|wav|mp3/.test(file.mimetype) || /\.(mp3|wav|ogg|m4a|aac)$/i.test(file.originalname);
-    cb(null, isAudio ? previewsDir : uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const base = String(file.originalname || 'upload').replace(/\.[^.]+$/, '').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
-    const ext = path.extname(file.originalname || '.png');
-    cb(null, `${Date.now()}-${base || 'file'}${ext}`);
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.admin) {
+    return res.status(401).json({ ok: false, error: 'Administrator login required.' });
   }
-});
+  return next();
+}
 
-const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const isAudio = /audio|mpeg|wav|mp3/.test(file.mimetype) || /\.(mp3|wav|ogg|m4a|aac)$/i.test(file.originalname);
+      cb(null, isAudio ? previewsDir : uploadsDir);
+    },
+    filename: (req, file, cb) => {
+      const base = String(file.originalname || 'upload').replace(/\.[^.]+$/, '').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
+      const ext = path.extname(file.originalname || '.png');
+      cb(null, `${Date.now()}-${base || 'file'}${ext}`);
+    }
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -281,14 +281,17 @@ app.use('/uploads', express.static(uploadsDir));
 app.use('/previews', express.static(previewsDir));
 app.use(express.static(rootDir));
 
-const apiLimiter = rateLimit({
+app.use('/api', rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: { ok: false, error: 'Too many requests. Please slow down.' }
+}));
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, status: 'healthy', currency: 'USD', paypalConfigured: isPayPalConfigured(), environment: PAYPAL_ENV });
 });
-app.use('/api', apiLimiter);
 
 app.get('/api/config', (req, res) => {
   res.json({ currency: 'USD', siteName: 'AFFANJALANBAIK', paypalConfigured: isPayPalConfigured(), environment: PAYPAL_ENV });
@@ -300,24 +303,15 @@ app.get('/api/catalog', (req, res) => {
 
 app.get('/api/paypal/config', (req, res) => {
   if (!isPayPalConfigured()) {
-    return res.status(503).json({
-      ok: false,
-      error: 'PayPal Sandbox credentials are not configured. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in your environment before checkout can work.',
-      clientId: '',
-      currency: 'USD',
-      sandbox: true,
-      configured: false,
-      setupRequired: true
-    });
+    return res.status(503).json({ ok: false, error: 'PayPal Sandbox credentials are not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in your environment.', clientId: '', currency: 'USD', configured: false, sandbox: true });
   }
-
-  return res.json({ ok: true, clientId: process.env.PAYPAL_CLIENT_ID, currency: 'USD', configured: true, sandbox: PAYPAL_ENV === 'sandbox', setupRequired: false });
+  return res.json({ ok: true, clientId: process.env.PAYPAL_CLIENT_ID, currency: 'USD', configured: true, sandbox: PAYPAL_ENV === 'sandbox' });
 });
 
 app.post('/api/paypal/orders', async (req, res) => {
   try {
     if (!isPayPalConfigured()) {
-      return res.status(503).json({ ok: false, error: 'PayPal Sandbox is not configured. Set the PayPal credentials in .env first.' });
+      return res.status(503).json({ ok: false, error: 'PayPal Sandbox is not configured. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET first.' });
     }
 
     const { items = [], customer = {} } = req.body || {};
@@ -376,13 +370,12 @@ app.post('/api/paypal/orders', async (req, res) => {
 app.post('/api/paypal/orders/:id/capture', async (req, res) => {
   try {
     if (!isPayPalConfigured()) {
-      return res.status(503).json({ ok: false, error: 'PayPal Sandbox is not configured. Setup is required before live purchase verification can occur.' });
+      return res.status(503).json({ ok: false, error: 'PayPal Sandbox is not configured. Setup is required before purchase verification.' });
     }
 
     const { id } = req.params;
     const { items = [], customer = {} } = req.body || {};
-    const validation = validateCart(items);
-    const total = validation.total;
+    const { normalized, total } = validateCart(items);
 
     const response = await fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${encodeURIComponent(id)}/capture`, {
       method: 'POST',
@@ -418,7 +411,7 @@ app.post('/api/paypal/orders/:id/capture', async (req, res) => {
       .run(orderId, customer.name || 'Customer', customer.email || 'customer@example.com', total, 'PAID', now);
 
     const itemInsert = db.prepare('INSERT INTO order_items (id, order_id, beat_id, license_id, title, license_name, quantity, unit_price_usd, total_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-    for (const item of validation.normalized) {
+    for (const item of normalized) {
       const itemId = crypto.randomUUID();
       itemInsert.run(itemId, orderId, item.beatId, item.licenseId, item.beat.title, item.license.name, item.quantity, Number(item.license.price), item.subtotal);
       if (item.licenseId === 'exclusive') {
@@ -430,19 +423,13 @@ app.post('/api/paypal/orders/:id/capture', async (req, res) => {
       .run(crypto.randomUUID(), orderId, body.id, capture.id || '', 'PAID', captureAmount, capture.amount?.currency_code || 'USD', JSON.stringify(body), now);
 
     const downloads = [];
-    for (const item of validation.normalized) {
-      const downloadPath = path.join(privateBeatDir, `${item.beatId}-${item.licenseId}.zip`);
+    for (const item of normalized) {
+      const filePath = path.join(privateBeatDir, `${item.beatId}-${item.licenseId}.zip`);
       const token = crypto.randomBytes(24).toString('hex');
       const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString();
       db.prepare('INSERT INTO downloads (id, order_id, beat_id, license_id, token, file_path, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(crypto.randomUUID(), orderId, item.beatId, item.licenseId, token, downloadPath, expiresAt, now);
-
-      downloads.push({
-        title: item.beat.title,
-        license: item.license.name,
-        url: `/api/download/${token}`,
-        expiresAt
-      });
+        .run(crypto.randomUUID(), orderId, item.beatId, item.licenseId, token, filePath, expiresAt, now);
+      downloads.push({ title: item.beat.title, license: item.license.name, url: `/api/download/${token}`, expiresAt });
     }
 
     return res.json({ ok: true, status: 'PAID', orderId, captureId: capture.id || '', amount: Number(captureAmount).toFixed(2), currency: 'USD', downloads });
@@ -488,39 +475,7 @@ app.post('/api/admin/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true, message: 'Logged out.' }));
 });
 
-app.get('/api/admin/beats', requireAdmin, (req, res) => {
-  const beats = db.prepare('SELECT * FROM beats ORDER BY created_at DESC').all();
-  const byBeat = {};
-  for (const beat of beats) byBeat[beat.id] = getBeatLicenses(beat.id);
-  res.json({ beats: beats.map((beat) => ({
-    id: beat.id,
-    title: beat.title,
-    genre: beat.genre,
-    bpm: Number(beat.bpm || 0),
-    key: beat.key_name || '',
-    description: beat.description || '',
-    cover: beat.cover_url || '',
-    preview: beat.preview_url || '',
-    status: beat.status,
-    isExclusiveSold: Number(beat.is_exclusive_sold || 0) === 1
-  })), licensesByBeat: byBeat });
-});
-
-app.get('/api/admin/orders', requireAdmin, (req, res) => {
-  const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
-  const payload = orders.map((order) => ({
-    id: order.id,
-    customerName: order.customer_name,
-    customerEmail: order.customer_email,
-    totalUsd: Number(order.total_usd || 0),
-    status: order.status,
-    createdAt: order.created_at,
-    items: db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id)
-  }));
-  res.json({ orders: payload });
-});
-
-app.post('/api/admin/beats', requireAdmin, upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'preview', maxCount: 1 }]), (req, res) => {
+function saveBeat(req, res) {
   try {
     const id = String(req.body.id || '').trim() || crypto.randomUUID();
     const title = String(req.body.title || '').trim();
@@ -549,9 +504,9 @@ app.post('/api/admin/beats', requireAdmin, upload.fields([{ name: 'cover', maxCo
     );
 
     const priceRows = [
-      { id: 'basic', name: 'Basic Lease', price: Number(req.body.basic_price || req.body.basicPrice || 150), description: 'Starter usage', formats: 'MP3', terms: 'Non-exclusive lease for early demos and short-term projects.', available: 1 },
+      { id: 'basic', name: 'Basic Lease', price: Number(req.body.basic_price || req.body.basicPrice || 150), description: 'Starter usage', formats: 'MP3', terms: 'Non-exclusive usage for demos and early releases.', available: 1 },
       { id: 'premium', name: 'Premium Lease', price: Number(req.body.premium_price || req.body.premiumPrice || 240), description: 'Expanded usage', formats: 'MP3 + WAV', terms: 'Broader commercial usage within a defined release scope.', available: 1 },
-      { id: 'exclusive', name: 'Exclusive License', price: Number(req.body.exclusive_price || req.body.exclusivePrice || 600), description: 'Full exclusive rights', formats: 'MP3 + WAV + stems', terms: 'Exclusive rights are subject to availability and confirmation before capture.', available: 1 }
+      { id: 'exclusive', name: 'Exclusive License', price: Number(req.body.exclusive_price || req.body.exclusivePrice || 600), description: 'Full exclusive rights', formats: 'MP3 + WAV + stems', terms: 'Exclusive rights require confirmation before capture.', available: 1 }
     ];
 
     const upsertLicense = db.prepare(`INSERT INTO licenses (id, beat_id, name, price, description, formats, terms, available) VALUES (@id, @beat_id, @name, @price, @description, @formats, @terms, @available) ON CONFLICT(beat_id, id) DO UPDATE SET name = excluded.name, price = excluded.price, description = excluded.description, formats = excluded.formats, terms = excluded.terms, available = excluded.available`);
@@ -573,25 +528,39 @@ app.post('/api/admin/beats', requireAdmin, upload.fields([{ name: 'cover', maxCo
     console.error('Admin beat save failed:', error);
     return res.status(500).json({ ok: false, error: error.message || 'Unable to save beat.' });
   }
+}
+
+app.get('/api/admin/beats', requireAdmin, (req, res) => {
+  const beats = db.prepare('SELECT * FROM beats ORDER BY created_at DESC').all();
+  const byBeat = {};
+  for (const beat of beats) byBeat[beat.id] = getBeatLicenses(beat.id);
+  res.json({ beats: beats.map((beat) => ({ id: beat.id, title: beat.title, genre: beat.genre, bpm: Number(beat.bpm || 0), key: beat.key_name || '', description: beat.description || '', cover: beat.cover_url || '', preview: beat.preview_url || '', status: beat.status, isExclusiveSold: Number(beat.is_exclusive_sold || 0) === 1 })), licensesByBeat: byBeat });
 });
 
-app.put('/api/admin/beats/:id', requireAdmin, upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'preview', maxCount: 1 }]), (req, res) => {
-  req.body.id = req.params.id;
-  return app._router.handle(req, res);
-});
+app.post('/api/admin/beats', requireAdmin, upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'preview', maxCount: 1 }]), saveBeat);
+app.put('/api/admin/beats/:id', requireAdmin, upload.fields([{ name: 'cover', maxCount: 1 }, { name: 'preview', maxCount: 1 }]), (req, res) => { req.body.id = req.params.id; return saveBeat(req, res); });
 
 app.delete('/api/admin/beats/:id', requireAdmin, (req, res) => {
   db.prepare('UPDATE beats SET status = ? WHERE id = ?').run('archived', req.params.id);
   res.json({ ok: true, message: 'Beat archived from the storefront.' });
 });
 
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(rootDir, 'admin.html'));
+app.get('/api/admin/orders', requireAdmin, (req, res) => {
+  const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
+  const payload = orders.map((order) => ({
+    id: order.id,
+    customerName: order.customer_name,
+    customerEmail: order.customer_email,
+    totalUsd: Number(order.total_usd || 0),
+    status: order.status,
+    createdAt: order.created_at,
+    items: db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id)
+  }));
+  res.json({ orders: payload });
 });
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(rootDir, 'index.html'));
-});
+app.get('/admin', (req, res) => { res.sendFile(path.join(rootDir, 'admin.html')); });
+app.get('/', (req, res) => { res.sendFile(path.join(rootDir, 'index.html')); });
 
 app.use((err, req, res, next) => {
   console.error('Unhandled server error:', err);
@@ -600,5 +569,5 @@ app.use((err, req, res, next) => {
 
 app.listen(port, () => {
   console.log(`AFFANJALANBAIK server running at http://localhost:${port}`);
-  console.log(`Admin login: ${ADMIN_USERNAME ? 'configured' : 'requires ADMIN_USERNAME and ADMIN_PASSWORD to be set in .env'}`);
+  console.log(`Admin login: ${ADMIN_USERNAME ? 'configured' : 'requires ADMIN_USERNAME and ADMIN_PASSWORD in .env'}`);
 });
