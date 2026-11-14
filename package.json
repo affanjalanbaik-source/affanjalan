@@ -5,8 +5,8 @@
   "description": "AFFANJALANBAIK marketplace with server-verified PayPal Checkout",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node -r ./preview-gateway.js server.js",
+    "dev": "node --watch --require ./preview-gateway.js server.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
