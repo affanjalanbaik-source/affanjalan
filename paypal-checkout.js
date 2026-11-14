@@ -104,6 +104,7 @@
 
     try {
       await loadSdk();
+      const checkoutCustomer = { name: nameInput.value.trim(), email: emailInput.value.trim() };
       window.paypal.Buttons({
         style: { layout: 'vertical', shape: 'rect', label: 'paypal', tagline: false },
         createOrder: async () => {
@@ -112,18 +113,19 @@
           const response = await fetch('/api/paypal/orders', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-            body: JSON.stringify({ items, customer: { name: nameInput.value.trim(), email: emailInput.value.trim() } })
+            body: JSON.stringify({ items, customer: checkoutCustomer })
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok || !body.id) throw new Error(body.error || 'Could not create a PayPal order.');
           return body.id;
         },
         onApprove: async (data) => {
+          const items = cartPayload();
           status('Verifying payment with PayPal…');
           const response = await fetch(`/api/paypal/orders/${encodeURIComponent(data.orderID)}/capture`, {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-            body: JSON.stringify({})
+            body: JSON.stringify({ items, customer: checkoutCustomer })
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok || body.status !== 'PAID') throw new Error(body.error || 'Payment has not been verified. No files are available yet.');
@@ -149,7 +151,7 @@
           } else {
             const note = document.createElement('p');
             note.className = 'notice';
-            note.textContent = 'Payment is verified. Secure file delivery is not configured for this demo catalog yet; contact the producer to arrange delivery. No unapproved or unpaid files have been exposed.';
+            note.textContent = 'Payment is verified. Secure file delivery is not configured for this demo catalog yet; contact the producer to arrange delivery. No unapproved or unpaid files have been released.';
             $('#paypalCheckoutPanel').append(note);
           }
           localStorage.removeItem('affan-cart');
