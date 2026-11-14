@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="AFFANJALANBAIK beat marketplace prototype. Explore and license beats for your next release.">
+  <meta name="description" content="AFFANJALANBAIK beat marketplace. Discover and license beats for your next release.">
   <title>AFFANJALANBAIK — Find Your Sound</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -671,7 +671,6 @@
         $('#goCheckout').disabled = false;
         body.innerHTML = cart.map((item, index) => {
           const beat = byId(item.beatId);
-          const license = licenses.find((entry) => entry.id === item.licenseId);
           return `
             <article class="cart-line">
               <div class="cart-line-top">
